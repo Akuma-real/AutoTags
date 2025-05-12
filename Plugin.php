@@ -5,7 +5,7 @@ if (!defined('__TYPECHO_ROOT_DIR__')) exit;
  * 
  * @package AutoTags
  * @author DT27
- * @version 2.0.0
+ * @version 3.0.0
  * @link https://dt27.cn/php/autotags-for-typecho/
  */
 class AutoTags_Plugin implements Typecho_Plugin_Interface
@@ -47,22 +47,23 @@ class AutoTags_Plugin implements Typecho_Plugin_Interface
             array(
                 '1' => '是',
                 '0' => '否',
-            ),'1', _t('是否启用标签自动提取功能'), _t('自动提取功能在文章已存在标签时不生效.'));
+            ),'1', _t('是否启用标签自动提取功能'), _t('自动提取功能在文章已存在标签时不生效.')
+        );
         $form->addInput($isActive);
     
         $api_key = new Typecho_Widget_Helper_Form_Element_Text(
-            'api_key', NULL, '',
-            _t('百度自然语言处理应用的API Key'),
-            _t('<a href="https://ai.baidu.com/ai-doc/REFERENCE/Ck3dwjgn3">应用注册方法</a> 需开通<a href="https://console.bce.baidu.com/ai/#/ai/nlp/overview/index">服务列表</a>中的“文章标签”API接口（不是“关键词提取”），并<a href="https://console.bce.baidu.com/ai/?_=1652794810218&fromai=1#/ai/nlp/overview/resource/getFree">领取免费额度<a>')
+            'api_key', NULL, 'sk-or-v1-*********',
+            _t('你的OpenRouter API Key'),
+            _t('免费申请地址：<a href="https://openrouter.ai/settings/keys" target="_blank">https://openrouter.ai/settings/keys</a>')
         );
         $form->addInput($api_key);
 
-        $secret_key = new Typecho_Widget_Helper_Form_Element_Text(
-            'secret_key', NULL, '',
-            _t('百度自然语言处理应用的Secret Key'),
-            _t('')
+        $api_model = new Typecho_Widget_Helper_Form_Element_Text(
+            'api_model', NULL, 'deepseek/deepseek-chat:free',
+            _t('调用ai模型'),
+            _t('建议使用deepseek/deepseek-chat:free模型，免费。可用模型列表：<a href="https://openrouter.ai/models" target="_blank">https://openrouter.ai/models</a>')
         );
-        $form->addInput($secret_key);
+        $form->addInput($api_model);
     }
     
     /**
@@ -93,72 +94,65 @@ class AutoTags_Plugin implements Typecho_Plugin_Interface
         $autoTags = Typecho_Widget::widget('Widget_Options')->plugin('AutoTags');
         //插件启用,且未手动设置标签
         if($autoTags->isActive == 1 && !$contents['tags']) {
-            Typecho_Widget::widget('Widget_Metas_Tag_Admin')->to($tags);
-            foreach($tags->stack as $tag){
-                $tagNames[] = $tag['name'];
+            //Typecho_Widget::widget('Widget_Metas_Tag_Admin')->to($tags);
+            //foreach($tags->stack as $tag){
+            //    $tagNames[] = $tag['name'];
+            //}
+            $endpoint = 'https://openrouter.ai/api/v1/chat/completions';
+            // 请求提示词
+            $prompt = "Extract 1-5 relevant tags that summarize the main topics of the following article title and content. Return the tags as a comma-separated list. Return only tags, no explanation or reasoning or any other things:**Title**: $title **Content**: $text";
+            $data = [
+                'model' => $autoTags->api_model,
+                'messages' => [
+                    [
+                        'role' => 'user',
+                        'content' => $prompt
+                    ]
+                ],
+                'stream' => false, // 非流式响应
+                'response_format' => ['type' => 'json_object'] // 要求 JSON 格式（若模型支持）
+            ];
+
+            // 初始化 cURL
+            $ch = curl_init();
+            curl_setopt($ch, CURLOPT_URL, $endpoint);
+            curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+            curl_setopt($ch, CURLOPT_POST, true);
+            curl_setopt($ch, CURLOPT_HTTPHEADER, [
+                'Authorization: Bearer ' . $autoTags->api_key,
+                'Content-Type: application/json',
+                'HTTP-Referer: https://dt27.cn/php/autotags-for-typecho/',
+                'X-Title: 标签自动提取插件 For Typecho'
+            ]);
+            curl_setopt($ch, CURLOPT_POSTFIELDS, json_encode($data));
+            // 执行请求
+            $response = curl_exec($ch);
+            // 检查错误
+            if (curl_errno($ch)) {
+                echo 'cURL Error: ' . curl_error($ch);
+                curl_close($ch);
+                exit;
             }
-            $postData = array(
-				'title' => $title,
-				'content' => $text
-			);
-            $ch = curl_init('https://aip.baidubce.com/rpc/2.0/nlp/v1/keyword?charset=UTF-8&access_token='.self::getAccessToken());
-            curl_setopt($ch, CURLOPT_TIMEOUT,10);
-            curl_setopt($ch, CURLOPT_SSL_VERIFYPEER,false);
-            curl_setopt($ch, CURLOPT_SSL_VERIFYHOST,false);
-            curl_setopt($ch, CURLOPT_RETURNTRANSFER,true);
-            curl_setopt($ch, CURLOPT_CUSTOMREQUEST, "POST");
-            curl_setopt($ch, CURLOPT_POSTFIELDS,json_encode($postData));
-            curl_setopt($ch, CURLOPT_HTTPHEADER,
-                array(
-                    'Content-Type: application/json',
-                    'Accept: application/json'
-                )
-            );
-            $result = curl_exec($ch);
+            // 获取 HTTP 状态码
+            $httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
             curl_close($ch);
-            $result = json_decode($result);
-            $items = $result->items;
-            if(count($items)<=0){
-				return $contents;
+            // 处理响应
+            if ($httpCode === 200) {
+                $result = json_decode($response, true);
+                if (isset($result['choices'][0]['message']['content'])) {
+                    // 将逗号分隔的字符串转换为数组
+                    $tagsArray = array_map('trim', explode(',', $result['choices'][0]['message']['content'])); // 分割并去除每个标签的空白
+                    //echo "Extracted Tags (Array):\n";
+                    $contents['tags']=implode(',', array_unique($tagsArray));
+                } else {
+                    echo "Error: No tags returned in response.\n";
+                    return $contents;
+                }
+            } else {
+                echo "HTTP Error: " . $httpCode . "\n";
+                echo "Response: " . $response . "\n";
             }
-            $sourceTags = array();
-            $i = 0;
-            foreach($items as $key => $tag){
-                if($i>6) break;
-                $i++;
-				if(in_array($tag->tag, $tagNames)){
-					if(in_array($tag->tag, $sourceTags)) continue;
-					$sourceTags[] = $tag->tag;
-				}else{
-				    $sourceTags[] = $tag->tag;
-				}
-            }
-            $contents['tags'] = implode(',', array_unique($sourceTags));
         }
         return $contents;
-    }
-    /**
-     * 百度平台授权
-     */
-    private static function getAccessToken()
-    {
-        $autoTags = Typecho_Widget::widget('Widget_Options')->plugin('AutoTags');
-		$curl = curl_init();
-        curl_setopt_array($curl, array(
-            CURLOPT_URL => "https://aip.baidubce.com/oauth/2.0/token?client_id=".$autoTags->api_key."&client_secret=".$autoTags->secret_key."&grant_type=client_credentials",
-            CURLOPT_TIMEOUT => 30,
-            CURLOPT_RETURNTRANSFER => true,
-            CURLOPT_SSL_VERIFYPEER  => false,
-            CURLOPT_SSL_VERIFYHOST  => false,
-            CURLOPT_CUSTOMREQUEST => 'POST',
-            CURLOPT_HTTPHEADER => array(
-                'Content-Type: application/json',
-                'Accept: application/json'
-            ),
-        ));
-        $response = curl_exec($curl);
-        curl_close($curl);
-        $response = json_decode($response);
-		return $response->access_token;
     }
 }
